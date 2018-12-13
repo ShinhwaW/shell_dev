@@ -1,0 +1,8 @@
+HOST_BASE=0.0.0.0
+
+
+BASE_PORT=3310
+
+
+DB_BASE=base
+

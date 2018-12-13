@@ -1,0 +1,130 @@
+#!/bin/sh
+
+###############################################
+# the script writed by wangsh , 2018-1-10 .
+# Cannot send pos request to SOA , then the script will redo it .
+###############################################
+
+current_date=`date "+%Y%m"`
+start_date=`date "+%Y-%m-%d 00:00:00"`
+end_date=`date "+%Y-%m-%d 23:59:59"`
+
+inte_logpath=/app/umapp/crontab_shell/payment_post/logs
+inte_log_name="payment_post.log"
+inte_shell_name=`basename $0`
+payment_list=/app/umapp/crontab_shell/payment_post/config/payment_list
+
+. /app/umapp/crontab_shell/connection_db/bin/connection_db.sh
+
+inte_running_date=`date "+%Y-%m-%d %H:%M:%S"`
+echo -e "\n---${inte_shell_name}------running time : ${inte_running_date}------------" >>${inte_logpath}/${inte_log_name}
+
+
+
+GET_ER_LIST_SQL="SELECT A.MSISDN FROM so1.um_memo_${current_date} a WHERE a.action_type IN (66,67) AND a.MSISDN IN (SELECT a.BILL_ID FROM so1.ord_cust_f_571_${current_date} a WHERE a.ORDER_STATE = '11' AND a.BUSINESS_ID = '15000003'  AND a.AGENCY_PERSON = 'CRM-eRecharge') GROUP BY a.MSISDN HAVING COUNT(1) <2"
+
+function prepare_memo_data(){
+	
+	INSERT_INTO_TEST_SQL="CREATE TABLE IF NOT EXISTS test.um_memo SELECT * FROM so1.um_memo_${current_date} a WHERE a.ACTION_TYPE = '66' AND a.MSISDN = '$1'"
+	echo "${INSERT_INTO_TEST_SQL}"
+	${DB_CONNECTION_SO1}"${INSERT_INTO_TEST_SQL};commit;"	
+	GET_BSCS_ID_SQL="SELECT a.BSCS_ID FROM so1.um_memo_${current_date} a WHERE a.ACTION_TYPE = '32' AND a.MSISDN = '$1' LIMIT 1"
+	echo "${GET_BSCS_ID_SQL}"
+	BSCS_ID="`${DB_CONNECTION_SO1}"${GET_BSCS_ID_SQL};"`"
+#	echo "${BSCS_ID}"
+	GET_ERECHARGE_TRANSACTION_ID_SQL="SELECT ERECHARGE_TRANSACTION_ID FROM so1.um_memo_${current_date} a WHERE a.ACTION_TYPE = '66' AND a.MSISDN = '$1' LIMIT 1"
+	ERECHARGE_TRANSACTION_ID="`${DB_CONNECTION_SO1}"${GET_ERECHARGE_TRANSACTION_ID_SQL};"`"
+#	echo "${ERECHARGE_TRANSACTION_ID}"
+	LONG_DESC="eRecharge Transaction ID: [${ERECHARGE_TRANSACTION_ID}]"
+#	echo "${LONG_DESC}"
+	GET_USER_ID_SQL="SELECT a.USER_ID FROM SO1.ins_user_571 a WHERE a.STATE = 1 AND a.BILL_ID ='$1'"
+	echo "${GET_USER_ID_SQL}"
+	USER_ID="`${DB_CONNECTION_SO1}"${GET_USER_ID_SQL};"`"
+#	echo "${USER_ID}"
+	GET_CONTRACT_ID_SQL="SELECT bscs_contract_id FROM integration.um_mapping_user a WHERE a.crm_user_id='${USER_ID}'"
+	echo "${GET_CONTRACT_ID_SQL}"
+	CONTRACT_ID="`${DB_CONNECTION_INTEGRATION}"${GET_CONTRACT_ID_SQL};"`"
+#	echo "${CONTRACT_ID}"
+	
+	UPDATE_SQL="UPDATE test.um_memo a SET a.MEMO_ID = (a.MEMO_ID-99999999),a.BSCS_ID='${BSCS_ID}',a.ACTION_TYPE = 67,a.SHORT_DESC='Credit to Subscriber Advance Payment: [50.0]',a.LONG_DESC = '${LONG_DESC}',a.EXT3='${CONTRACT_ID}' WHERE a.ACTION_TYPE = '66' AND a.MSISDN = '$1'"
+	echo "${UPDATE_SQL}"
+	${DB_CONNECTION_SO1}"${UPDATE_SQL};commit;"
+
+
+
+}
+
+
+#prepare_memo_data 60184054875
+
+function move_to_production(){
+	MOVE_PRODUCTION_SQL="INSERT INTO SO1.um_memo_${current_date} SELECT * FROM test.um_memo a WHERE a.MSISDN = '$1'"
+	echo "${MOVE_PRODUCTION_SQL}"
+	${DB_CONNECTION_SO1}"${MOVE_PRODUCTION_SQL};commit;"
+}
+
+#move_to_production 60184054875
+
+
+function prepare_payment_data(){
+	GET_POS_DATA_SQL="SELECT a.REC_ID,a.RECEIPT_ID-9999999,a.ACCT_ID,a.SERVICE_NUMBER,a.OPER_ID,a.ORG_ID,a.BSCS_ACCT_NO FROM ams1.um_pos_transaction_rec_${current_date} a WHERE a.SERVICE_NUMBER = '$1'"
+	echo "${GET_POS_DATA_SQL}"
+	PAYMENT_DATA_LIST=($(${DB_CONNECTION_AMS1}"${GET_POS_DATA_SQL}"))
+	REC_ID="${PAYMENT_DATA_LIST[0]}"
+	RECEIPT_ID="${PAYMENT_DATA_LIST[1]}"
+	ACCT_ID="${PAYMENT_DATA_LIST[2]}"
+	OP_ID="${PAYMENT_DATA_LIST[4]}"
+	ORG_ID="${PAYMENT_DATA_LIST[5]}"
+	BSCS_ACCOUNT_ID="${PAYMENT_DATA_LIST[6]}"
+	
+	GET_CUST_ID_AND_AMOUT_SQL="SELECT a.CUST_ID,A.ERECHARGE_AMOUNT FROM so1.um_memo_${current_date} a WHERE a.ACTION_TYPE = '66' AND a.MSISDN = '$1' LIMIT 1"
+	echo "${GET_CUST_ID_AND_AMOUT_SQL}"  
+	CUST_ID_AND_AMOUT_LIST=($(${DB_CONNECTION_SO1}"${GET_CUST_ID_AND_AMOUT_SQL}")) 
+	CUST_ID="${CUST_ID_AND_AMOUT_LIST[0]}"
+	AMOUNT="${CUST_ID_AND_AMOUT_LIST[1]}00"
+	
+	GET_ORG_INFO_SQL="SELECT a.CODE,a.ORGANIZE_NAME FROM sec.sec_organize a WHERE a.ORGANIZE_ID = '${ORG_ID}'"
+	echo "${GET_ORG_INFO_SQL}"  
+	ORG_INFO_LIST=($(${DB_CONNECTION_SEC}"${GET_ORG_INFO_SQL}"))
+	BUSCODE="${ORG_INFO_LIST[0]}"	
+	ORG_NAME="${ORG_INFO_LIST[1]}"
+#	echo "${BUSCODE}"
+#	echo "${ORG_NAME}"
+
+	GET_BSCS_CUSTOMER_ID_SQL="SELECT A.bscs_customer_id FROM integration.um_mapping_cust a WHERE a.crm_acct_id='${ACCT_ID}'"
+	BSCS_CUSTOMER_ID="`${DB_CONNECTION_INTEGRATION}"${GET_BSCS_CUSTOMER_ID_SQL};"`"
+#	echo "${BSCS_CUSTOMER_ID}"
+
+	INSERT_PAYMENT_SQL="INSERT INTO integration.i_pos_transaction_rec SELECT '${REC_ID}', '${RECEIPT_ID}', '1', '${ACCT_ID}','0', '$1','${CUST_ID}','${AMOUNT}',0, 0,'', 0, NULL, NULL,NULL, NULL, NULL, NULL, NULL, NULL, NULL,   NULL, NOW(),  '${OP_ID}', '${ORG_ID}', 0, 0,0, NULL,    NULL, 0, '4', NULL, NULL, NULL, 0,0, 0, 0, 0, 0, 0, 0,  NULL, 5, 0, '80005', 0, NULL, '1', '${BSCS_ACCOUNT_ID}', '${ORG_NAME}', 'BillCash', NULL, NULL, NOW(), 'CRM,${BUSCODE}', NULL,  NULL, NULL, '0', 0, '${BSCS_CUSTOMER_ID}', NULL, NULL, 0,'UMCRM01',NULL FROM DUAL"
+	echo "${INSERT_PAYMENT_SQL}"
+
+	${DB_CONNECTION_INTEGRATION}"${INSERT_PAYMENT_SQL};commit;"
+}
+
+
+#prepare_payment_data 60184054875
+
+
+
+function main_entrance(){
+	echo -e "\n---start to process $1------running time : ${inte_running_date}------------" >>${inte_logpath}/${inte_log_name}
+	prepare_memo_data $1
+	move_to_production $1
+	prepare_payment_data $1
+	echo -e "\n---finish to process $1------running time : ${inte_running_date}------------" >>${inte_logpath}/${inte_log_name}
+}
+
+
+#main_entrance 60189679959
+
+
+ER_LIST=($(${DB_CONNECTION_SO1}"${GET_ER_LIST_SQL}"))
+
+for s in ${ER_LIST[*]}
+        do
+                echo -e "\n---found $s need to be processe------running time : ${inte_running_date}------------" >>${inte_logpath}/${inte_log_name}
+                main_entrance $s
+        done
+
+
+
